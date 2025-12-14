@@ -1,0 +1,135 @@
+name: 发布版本
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            binary_name: av
+            artifact_name: av-linux-amd64
+          - os: windows-latest
+            binary_name: av.exe
+            artifact_name: av-windows-amd64.exe
+          - os: macos-latest
+            binary_name: av
+            artifact_name: av-macos-amd64
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 缓存 uv 依赖
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+
+      - name: 安装依赖
+        run: |
+          uv pip install -e ".[dev]"
+
+      - name: 运行测试
+        run: |
+          uv run pytest tests/ -v
+
+      - name: 清理旧构建
+        shell: pwsh
+        if: runner.os == 'Windows'
+        run: |
+          if (Test-Path dist) { Remove-Item -Recurse -Force dist }
+          if (Test-Path build) { Remove-Item -Recurse -Force build }
+          if (Test-Path *.spec) { Remove-Item -Force *.spec }
+
+      - name: 清理旧构建 (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          rm -rf dist build *.spec
+
+      - name: 构建二进制文件 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          uv run --with pyinstaller pyinstaller --name av --onefile src/av/__main__.py
+
+      - name: 构建二进制文件 (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          uv run --with pyinstaller pyinstaller --name av --onefile src/av/__main__.py
+
+      - name: 准备发布文件
+        run: |
+          mkdir -p release
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            cp dist/${{ matrix.binary_name }} release/${{ matrix.artifact_name }}
+          else
+            cp dist/${{ matrix.binary_name }} release/${{ matrix.artifact_name }}
+            chmod +x release/${{ matrix.artifact_name }}
+          fi
+        shell: pwsh
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/${{ matrix.artifact_name }}
+          retention-days: 30
+
+  release:
+    name: 创建 GitHub 发布
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+
+      - name: 获取标签名
+        id: tag
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "标签: $TAG"
+
+      - name: 显示发布文件
+        run: |
+          echo "发布文件列表:"
+          ls -lh release/
+
+      - name: 创建 GitHub 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: 发布 ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') || contains(steps.tag.outputs.tag, 'alpha') || contains(steps.tag.outputs.tag, 'beta') || contains(steps.tag.outputs.tag, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

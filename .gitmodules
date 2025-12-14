@@ -1,0 +1,3 @@
+[submodule "test_repos/ACE-Step"]
+	path = test_repos/ACE-Step
+	url = https://github.com/ace-step/ACE-Step
